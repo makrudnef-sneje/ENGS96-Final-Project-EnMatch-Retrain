@@ -1,9 +1,8 @@
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Minimal installer for local CPU usage.
-Creates/uses whatever Python is on PATH. If you prefer a venv, create it first.
+Install Py3.6-compatible deps required by the EnMatch repo.
+Run with:  python install_requirements.py
 """
 import subprocess, sys
 
@@ -11,11 +10,26 @@ def run(cmd):
     print(">", " ".join(cmd))
     subprocess.check_call(cmd)
 
-# Upgrade pip
-run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+# Keep pip in a Py3.6-friendly range
+run([sys.executable, "-m", "pip", "install", "--upgrade", "pip<22"])
 
-# Core deps (Gymnasium is maintained; repo can import gym, we provide both)
-run([sys.executable, "-m", "pip", "install",
-     "torch", "numpy", "gymnasium>=0.29", "cloudpickle", "ortools"])
+# Core packages pinned for Python 3.6 / this repo
+for pkg in [
+    "torch==1.9.0",
+    "numpy==1.19.2",
+    "cloudpickle==1.6.0",
+    "gym==0.26.2",
+]:
+    run([sys.executable, "-m", "pip", "install", pkg])
 
-print("\n✅ Done. If imports fail, ensure you run scripts from the repo root so 'code/' is discoverable.")
+# Try a few ortools versions that supported 3.6
+for v in ["8.2.8710", "8.1.8487", "8.0.8283"]:
+    try:
+        run([sys.executable, "-m", "pip", "install", "ortools==%s" % v])
+        break
+    except subprocess.CalledProcessError:
+        print("... trying next OR-Tools version")
+else:
+    print("WARNING: Could not install ortools automatically; continue only if not required.")
+
+print("\n✅ Dependencies installed.")

@@ -255,9 +255,7 @@ class ActorCritic(nn.Module):
             self.actor = nn.Sequential(
                 nn.Linear(state_dim, 64),
                 nn.Tanh(),
-                nn.Linear(64, 128),
-                nn.Tanh(),
-		        nn.Linear(128, 64),
+                nn.Linear(64, 64),
 		        nn.Tanh(),
                 nn.Linear(64, action_dim),
                 nn.Tanh()
