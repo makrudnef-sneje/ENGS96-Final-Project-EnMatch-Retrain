@@ -114,8 +114,11 @@ def main():
     cfg_edited.update({
         "embed_dim": 192,     # bump from default 128
         "hidden_dim": 192,
-        "trial_name": "edited_auto"
+        "trial_name": "edited_auto",
+        "num_encoder_layers": 3,
+        "num_decoder_layers": 3,
     })
+
 
     # Launch baseline then edited
     log_a = launch_train("baseline", cfg_baseline, args.hours)

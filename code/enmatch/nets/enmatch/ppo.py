@@ -7,16 +7,13 @@ from enmatch.env.simpleMatch import SimpleMatchRecEnv
 
 ################################## set device ##################################
 print("============================================================================================")
-# set device to cpu or cuda
-device = torch.device('cpu')
-if(torch.cuda.is_available()):
-    device = torch.device('cuda:0')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+if device.type == 'cuda':
     torch.cuda.empty_cache()
-    print("Device set to : " + str(torch.cuda.get_device_name(device)))
+    print("Device set to :", torch.cuda.get_device_name(0))
 else:
     print("Device set to : cpu")
 print("============================================================================================")
-
 
 ################################## PPO Policy ##################################
 class RolloutBuffer:
@@ -70,10 +67,16 @@ class EnNet(nn.Module):
         assert self.emb_dim == self.hid_dim
         # self.encoder = nn.LSTM(self.emb_dim, self.hid_dim, batch_first=True)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=self.emb_dim, nhead=8, dim_feedforward=256)
-        self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=2)
-        # self.decoder = nn.LSTM(self.emb_dim, self.hid_dim, batch_first=True)
+        self.encoder = nn.TransformerEncoder(
+            self.encoder_layer,
+            num_layers=int(conf.get('num_encoder_layers', 2))
+        )
+
         self.decoder_layer = nn.TransformerDecoderLayer(d_model=self.emb_dim, nhead=8, dim_feedforward=256)
-        self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=2)
+        self.decoder = nn.TransformerDecoder(
+            self.decoder_layer,
+            num_layers=int(conf.get('num_decoder_layers', 2))
+        )
         self.pointer = Attention(self.hid_dim, clipping=self.clipping, mode='Dot')
         # self.glimpse = Attention(self.hid_dim, clipping=False, mode=self.att_mode)
 
@@ -395,8 +398,9 @@ class PPO:
 
         if self.has_continuous_action_space:
             with torch.no_grad():
-                state = torch.FloatTensor(state).to(device)
-                [action, heuristic_action], action_logprob, state_val = self.policy_old.act(state)
+                state = torch.as_tensor(state, dtype=torch.float32, device=device)
+                action, action_logprob, state_val = self.policy_old.act(state)
+                heuristic_action = action  # keep return signature consistent
 
             for i in range(int(state.size(0))):
                 self.buffer.states.append(state[i])
@@ -405,18 +409,37 @@ class PPO:
                 self.buffer.state_values.append(state_val[i])
 
             return action.detach().cpu().numpy().flatten(), heuristic_action.detach().cpu().numpy().flatten()
+
         else:
             with torch.no_grad():
-                if isinstance(state[0], dict):
-                    obs = [x['obs'] for x in state]
-                    obs = torch.FloatTensor(obs).to(device)
-                    action_mask = [x['action_mask'] for x in state]
-                    action_mask = torch.FloatTensor(action_mask).to(device)
-                    [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs, action_mask)
+                # Case 1: state is a single dict from the env
+                if isinstance(state, dict):
+                    obs = torch.as_tensor(state['obs'], dtype=torch.float32, device=device).unsqueeze(0)
+                    action_mask = None
+                    if 'action_mask' in state and state['action_mask'] is not None:
+                        action_mask = torch.as_tensor(state['action_mask'], dtype=torch.float32, device=device).unsqueeze(0)
+                    if action_mask is not None:
+                        [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs, action_mask)
+                    else:
+                        [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs)
+
+                # Case 2: list/tuple of dicts
+                elif isinstance(state, (list, tuple)) and len(state) > 0 and isinstance(state[0], dict):
+                    obs = torch.as_tensor([x['obs'] for x in state], dtype=torch.float32, device=device)
+                    if 'action_mask' in state[0] and state[0]['action_mask'] is not None:
+                        action_mask = torch.as_tensor([x['action_mask'] for x in state], dtype=torch.float32, device=device)
+                        [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs, action_mask)
+                    else:
+                        [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs)
+
+                # Case 3: tensor-like array already
                 else:
-                    obs = torch.FloatTensor(state).to(device)
+                    obs = torch.as_tensor(state, dtype=torch.float32, device=device)
+                    if obs.dim() == 1:
+                        obs = obs.unsqueeze(0)
                     [action, heuristic_action], action_logprob, state_val = self.policy_old.act(obs)
-            action_t = torch.transpose(action,0,1)
+
+            action_t = torch.transpose(action, 0, 1)
             for i in range(int(obs.size(0))):
                 self.buffer.states.append(obs[i])
                 self.buffer.actions.append(action_t[i])
@@ -424,7 +447,6 @@ class PPO:
                 self.buffer.state_values.append(state_val[i])
 
             return action.detach().cpu().numpy().astype(np.int64), heuristic_action.detach().cpu().numpy().astype(np.int64)
-
     def update(self, max_ep_len, batch_size):
         buffer_rewards = np.swapaxes(np.array(self.buffer.rewards).reshape((-1, max_ep_len, batch_size)),1,2).flatten()
         buffer_is_terminals = np.swapaxes(np.array(self.buffer.is_terminals).reshape((-1, max_ep_len, batch_size)),1,2).flatten()

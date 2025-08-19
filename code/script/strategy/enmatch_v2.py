@@ -258,55 +258,93 @@ def train(config, env, env_copy):
 
 
 if __name__ == '__main__':
-    import sys
+    import sys, json
     from script.strategy.utils import default_config
     from enmatch.env import *
-    extra_config = eval(sys.argv[1]) if len(sys.argv) >= 2 else {}
-    num_per_team = default_config['num_per_team']
-    num_matches = default_config['num_matches']
-    config = {
-        **default_config,
-        'epoch':100000,
-        'batch_size':32,
-        'num_players': 2*num_per_team*num_matches,
-        'num_features': 1,
-        'gpu':0,
-        **extra_config
-    }
-    config['clipping'] = 10
-    config['num_seeds'] = 1  # number of experimental seeds
-    config['device'] = 'cuda'
-    config['threshold'] = 0.0
-    # config['train_size'] = int(4e4)
-    # config['valid_size'] = int(4e3)
-    config['embed_dim'] = 128
-    config['hidden_dim'] = 128
-    config['att_mode'] = "Dot"
-    config['n_glimpses'] = 1
-    # config['num_epochs'] = 100
-    # config['batch_size'] = 128
-    config['lr'] = 1e-4
 
-    # config['num_matches'] = 1
-    # config['num_per_team'] = 3
-    config['reward_type'] = 'linear'
-    # config['train_file'] = '/project/encom/enmatch/dataset/simplematch_6_3_100_100000_linear_opt.csv.2'
-    # config['valid_file'] = '/project/encom/enmatch/dataset/simplematch_6_3_100_100000_linear_opt.csv.2'
+    # --- helper: convert any default_config object to a plain dict ---
+    def _to_dict(obj):
+        # already a dict
+        if isinstance(obj, dict):
+            return dict(obj)
+        # mapping-like
+        if hasattr(obj, "items"):
+            try:
+                return dict(obj)
+            except Exception:
+                pass
+        # class/namespace with attributes
+        if hasattr(obj, "__dict__"):
+            return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+        # nothing usable
+        return {}
 
-    config['num_nodes'] = config['num_per_team'] * 2
+    defaults = _to_dict(default_config)
+
+    # --- parse JSON overrides passed from train_models.py safely (no eval) ---
+    extra_config = {}
+    if len(sys.argv) >= 2 and isinstance(sys.argv[1], str) and sys.argv[1].strip().startswith("{"):
+        try:
+            extra_config = json.loads(sys.argv[1])
+        except Exception as e:
+            print("Warning: could not parse extra_config JSON:", e)
+            extra_config = {}
+
+    # --- compute dependent fields using defaults (with fallbacks) ---
+    num_per_team = int(defaults.get('num_per_team', 3))
+    num_matches  = int(defaults.get('num_matches', 3))
+
+    # --- start with defaults, then set/override fields explicitly ---
+    config = {}
+    config.update(defaults)
+
+    # core training knobs (repo defaults preserved, can be overridden by extra_config)
+    config['epoch']       = config.get('epoch', 100000)
+    config['batch_size']  = config.get('batch_size', 32)
+    config['num_players'] = 2 * num_per_team * num_matches
     config['num_features'] = 1
-    config['seq_len'] = config['num_nodes']
-    config['input_dim'] = config['num_features']
-    config['vocab_size'] = 10000 if config['num_per_team']<5 else 1000000
-    config['action_size'] = config['max_steps'] = config['num_players'] = 2 * config['num_per_team'] * config['num_matches']
+    config['gpu']          = config.get('gpu', 0)
+
+    # safe device selection
+    config['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # other defaults from your file
+    config['clipping']     = config.get('clipping', 10)
+    config['num_seeds']    = config.get('num_seeds', 1)
+    config['threshold']    = config.get('threshold', 0.0)
+    config['embed_dim']    = config.get('embed_dim', 128)
+    config['hidden_dim']   = config.get('hidden_dim', 128)
+    config['att_mode']     = config.get('att_mode', "Dot")
+    config['n_glimpses']   = config.get('n_glimpses', 1)
+    config['lr']           = config.get('lr', 1e-4)
+    config['reward_type']  = config.get('reward_type', 'linear')
+
+    # now apply JSON overrides from the launcher (these win)
+    config.update(extra_config)
+
+    # recompute dependent sizes in case overrides changed num_per_team/num_matches
+    num_per_team = int(config.get('num_per_team', num_per_team))
+    num_matches  = int(config.get('num_matches', num_matches))
+    config['num_nodes']   = num_per_team * 2
+    config['num_features'] = 1
+    config['seq_len']     = config['num_nodes']
+    config['input_dim']   = config['num_features']
+    config['vocab_size']  = 10000 if num_per_team < 5 else 1000000
+    config['action_size'] = 2 * num_per_team * num_matches
+    config['max_steps']   = config['action_size']
+    config['num_players'] = config['action_size']
+    config['obs_size']    = config['num_players'] * 3
+
     print(config)
-    config['obs_size'] = config['num_players'] * 3
-    recsim = SeqSimpleMatchRecEnv(config = config, state_cls=SeqSimpleMatchState)
-    env = RecEnvBase(recsim)
+
+    # build envs
+    recsim     = SeqSimpleMatchRecEnv(config=config, state_cls=SeqSimpleMatchState)
+    env        = RecEnvBase(recsim)
     env.seed(1)
-    recsim_copy = SeqSimpleMatchRecEnv(config = config, state_cls=SeqSimpleMatchState)
-    env_copy = RecEnvBase(recsim_copy)
+    recsim_copy = SeqSimpleMatchRecEnv(config=config, state_cls=SeqSimpleMatchState)
+    env_copy    = RecEnvBase(recsim_copy)
     env_copy.seed(1)
-    # env.reset()
+
     torch.autograd.set_detect_anomaly(True)
     train(config, env, env_copy)
+
